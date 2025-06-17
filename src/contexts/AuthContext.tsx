@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { api } from '../services/api';
+import { supabase } from '../lib/supabase';
 import { Usuario, DadosAutenticacao, TipoUsuario } from '../types';
 import { toast } from 'react-hot-toast';
+import type { User } from '@supabase/supabase-js';
 
 interface AuthContextType {
   usuario: Usuario | null;
@@ -25,33 +26,86 @@ export const useAuth = () => {
   return context;
 };
 
-const STORAGE_KEY = '@GerenciadorFilas:usuario';
-const TOKEN_KEY = '@GerenciadorFilas:token';
-
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [usuario, setUsuario] = useState<Usuario | null>(null);
   const [carregando, setCarregando] = useState(true);
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Carrega usuário do localStorage ao inicializar
+  // Verificar sessão existente
   useEffect(() => {
-    const recuperarUsuario = () => {
-      const storedUser = localStorage.getItem(STORAGE_KEY);
-      const token = localStorage.getItem(TOKEN_KEY);
-
-      if (storedUser && token) {
-        setUsuario(JSON.parse(storedUser));
-        api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    const verificarSessao = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (session?.user) {
+          await carregarUsuario(session.user);
+        }
+      } catch (error) {
+        console.error('Erro ao verificar sessão:', error);
+      } finally {
+        setCarregando(false);
       }
-
-      setCarregando(false);
     };
 
-    recuperarUsuario();
+    verificarSessao();
+
+    // Escutar mudanças na autenticação
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        await carregarUsuario(session.user);
+      } else if (event === 'SIGNED_OUT') {
+        setUsuario(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Redireciona com base no estado de autenticação e tipo de usuário
+  // Carregar dados do usuário
+  const carregarUsuario = async (user: User) => {
+    try {
+      const { data: userData, error } = await supabase
+        .from('usuarios')
+        .select(`
+          *,
+          empresa:empresas(*)
+        `)
+        .eq('id', user.id)
+        .single();
+
+      if (error) {
+        console.error('Erro ao carregar usuário:', error);
+        return;
+      }
+
+      if (userData) {
+        const usuarioFormatado: Usuario = {
+          id: userData.id,
+          nome: userData.nome,
+          email: userData.email,
+          tipo: userData.tipo as TipoUsuario,
+          empresa_id: userData.empresa_id,
+          empresa: userData.empresa ? {
+            id: userData.empresa.id,
+            nome: userData.empresa.nome,
+            cnpj: userData.empresa.cnpj,
+            status: userData.empresa.status,
+            criado_em: userData.empresa.criado_em,
+            atualizado_em: userData.empresa.atualizado_em
+          } : undefined,
+          status: userData.status,
+          criado_em: userData.criado_em
+        };
+
+        setUsuario(usuarioFormatado);
+      }
+    } catch (error) {
+      console.error('Erro ao carregar dados do usuário:', error);
+    }
+  };
+
+  // Redirecionar com base no estado de autenticação
   useEffect(() => {
     if (!carregando) {
       const paginaAtual = location.pathname;
@@ -74,97 +128,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = async (dados: DadosAutenticacao) => {
     try {
       setCarregando(true);
-      await new Promise(resolve => setTimeout(resolve, 1000));
       
-      let usuarioMock: Usuario;
-      
-      // Login de master admin
-      if (dados.email === 'master@sistema.com' && dados.senha === 'master123') {
-        usuarioMock = {
-          id: 1,
-          nome: 'Master Admin',
-          email: 'master@sistema.com',
-          tipo: TipoUsuario.MASTER_ADMIN,
-          status: 'ativo',
-          criado_em: new Date().toISOString()
-        };
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: dados.email,
+        password: dados.senha,
+      });
+
+      if (error) {
+        throw error;
       }
-      // Login de admin
-      else if (dados.email === 'admin@exemplo.com' && dados.senha === 'senha123') {
-        usuarioMock = {
-          id: 2,
-          nome: 'Administrador',
-          email: 'admin@exemplo.com',
-          tipo: TipoUsuario.ADMIN,
-          empresa_id: 1,
-          empresa: {
-            id: 1,
-            nome: 'Empresa Padrão',
-            cnpj: '00.000.000/0001-00',
-            status: 'ativo',
-            criado_em: new Date().toISOString(),
-            atualizado_em: new Date().toISOString()
-          },
-          status: 'ativo',
-          criado_em: new Date().toISOString()
-        };
-      } 
-      // Login de atendente
-      else if (dados.email === 'atendente@exemplo.com' && dados.senha === 'senha123') {
-        usuarioMock = {
-          id: 3,
-          nome: 'Atendente',
-          email: 'atendente@exemplo.com',
-          tipo: TipoUsuario.ATENDENTE,
-          empresa_id: 1,
-          empresa: {
-            id: 1,
-            nome: 'Empresa Padrão',
-            cnpj: '00.000.000/0001-00',
-            status: 'ativo',
-            criado_em: new Date().toISOString(),
-            atualizado_em: new Date().toISOString()
-          },
-          status: 'ativo',
-          criado_em: new Date().toISOString()
-        };
-      } 
-      // Login inválido
-      else {
-        throw new Error('Credenciais inválidas');
+
+      if (data.user) {
+        await carregarUsuario(data.user);
+        toast.success('Login realizado com sucesso!');
       }
-      
-      const token = 'token-mock-' + Math.random().toString(36).substring(2);
-      
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(usuarioMock));
-      localStorage.setItem(TOKEN_KEY, token);
-      
-      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      
-      setUsuario(usuarioMock);
-      
-      if (usuarioMock.tipo === TipoUsuario.MASTER_ADMIN || usuarioMock.tipo === TipoUsuario.ADMIN) {
-        navigate('/dashboard');
-      } else {
-        navigate('/atendimento');
-      }
-      
-      toast.success('Login realizado com sucesso!');
-    } catch (error) {
-      toast.error('Falha no login. Verifique suas credenciais.');
-      console.error(error);
+    } catch (error: any) {
+      console.error('Erro no login:', error);
+      toast.error(error.message || 'Falha no login. Verifique suas credenciais.');
     } finally {
       setCarregando(false);
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-    delete api.defaults.headers.common['Authorization'];
-    setUsuario(null);
-    navigate('/login');
-    toast.success('Logout realizado com sucesso!');
+  const logout = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      
+      setUsuario(null);
+      navigate('/login');
+      toast.success('Logout realizado com sucesso!');
+    } catch (error: any) {
+      console.error('Erro no logout:', error);
+      toast.error('Erro ao fazer logout');
+    }
   };
 
   const verificarAutenticacao = () => {
